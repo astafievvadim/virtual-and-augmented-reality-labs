@@ -1,3 +1,5 @@
-Virtual and Augmented Reality laboratory №1
+Virtual and Augmented Reality everything
+---
+
 
 It works, couldn't ask for more
