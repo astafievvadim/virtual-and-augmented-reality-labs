@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Управление ананасом жестами</title>
+  <!-- WebRTC adapter для полифилла getUserMedia -->
+  <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
+  <style>
+    body { margin:0; overflow:hidden; background:#1a1a1a; }
+    .input_video, .output_canvas {
+      position:absolute; top:5vw; left:5vw;
+      width:30vw; height:auto;
+      max-width:320px;
+      transform:scaleX(-1);
+      border:2px solid #4caf50;
+      border-radius:4vw;
+      box-shadow:0 2vw 6vw rgba(0,0,0,0.5);
+      z-index:2;
+    }
+    .input_video { visibility:hidden; }
+    #gestureName {
+      position:absolute; bottom:5vw; left:5vw;
+      color:#fff; font-family:sans-serif; font-size:4vw;
+      background:rgba(0,0,0,0.6);
+      padding:2vw 4vw; border-radius:4vw;
+      text-transform:capitalize;
+      z-index:2;
+    }
+    .webgl {
+      position:absolute; top:0; left:0;
+      width:100vw; height:100vh;
+      z-index:1;
+    }
+    @media (max-width: 480px) {
+      .input_video, .output_canvas { width:45vw; }
+      #gestureName { font-size:5vw; padding:3vw 5vw; }
+    }
+  </style>
+</head>
+<body>
+
+  <video class="input_video" autoplay muted playsinline></video>
+  <canvas class="output_canvas" width="320" height="240"></canvas>
+  <div id="gestureName">ожидание...</div>
+
+  <!-- медиапайп, три.js и утилиты -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.153.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+  <script>
+  // полифилл для getUserMedia
+  (function() {
+    if (!navigator.mediaDevices) {
+      navigator.mediaDevices = {};
+    }
+    if (!navigator.mediaDevices.getUserMedia) {
+      navigator.mediaDevices.getUserMedia = function(constraints) {
+        const getUserMedia = navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+        if (!getUserMedia) {
+          return Promise.reject(new Error('getUserMedia не поддерживается'));
+        }
+        return new Promise((resolve, reject) => {
+          getUserMedia.call(navigator, constraints, resolve, reject);
+        });
+      };
+    }
+  })();
+
+  const HAND_CONNECTIONS = [
+    [0,1],[1,2],[2,3],[3,4],[5,6],[6,7],[7,8],
+    [9,10],[10,11],[11,12],[13,14],[14,15],[15,16],
+    [17,18],[18,19],[19,20],[0,5],[5,9],[9,13],[13,17],[17,0]
+  ];
+
+  const videoEl   = document.querySelector('.input_video');
+  const canvasEl  = document.querySelector('.output_canvas');
+  const ctx       = canvasEl.getContext('2d');
+  const gestureEl = document.getElementById('gestureName');
+
+  // three.js сцена
+  const scene    = new THREE.Scene();
+  const camera3D = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+  const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.domElement.classList.add('webgl');
+  document.body.appendChild(renderer.domElement);
+  camera3D.position.z = 3;
+
+  const pivot = new THREE.Object3D();
+  scene.add(pivot);
+
+  // тело ананаса
+  const trunk = new THREE.Mesh(
+    new THREE.DodecahedronGeometry(0.6,1),
+    new THREE.MeshStandardMaterial({ color:0xFFD54F, flatShading:true })
+  );
+  trunk.scale.y = 1.2;
+  pivot.add(trunk);
+
+  // листья
+  const leaves = new THREE.Group();
+  leaves.rotation.x = Math.PI;
+  const leafGeo = new THREE.ConeGeometry(0.2, 0.4, 8, 1);
+  const leafMat = new THREE.MeshStandardMaterial({ color:0x66BB6A, flatShading:true });
+  for(let i=0;i<7;i++){
+    const lf = new THREE.Mesh(leafGeo, leafMat);
+    lf.position.y = 0.9;
+    lf.rotation.z = i * (2*Math.PI/7);
+    lf.rotation.x = Math.PI/2;
+    leaves.add(lf);
+  }
+  leaves.position.y = 1.63;
+  pivot.add(leaves);
+
+  // свет
+  const dirLight = new THREE.DirectionalLight(0xffffff,1);
+  dirLight.position.set(2,2,3);
+  scene.add(dirLight);
+  scene.add(new THREE.AmbientLight(0x404040,1));
+
+  let scale=1, cooldown=0, lastGesture='none';
+  let pointerSpeed=0, smoothSpeed=0;
+
+  function animate(){
+    requestAnimationFrame(animate);
+    smoothSpeed += (pointerSpeed - smoothSpeed)*0.1;
+    pivot.rotation.y += 0.002 + smoothSpeed;
+    pivot.scale.set(scale,scale,scale);
+    renderer.render(scene, camera3D);
+    if(cooldown>0) cooldown--;
+  }
+  animate();
+
+  function getFingerStates(L){
+    return {
+      thumbUp:   L[4].y < L[3].y-0.04,
+      thumbDown: L[4].y > L[3].y+0.04,
+      index:     L[8].y < L[6].y-0.02,
+      middle:    L[12].y< L[10].y-0.02,
+      ring:      L[16].y< L[14].y-0.02,
+      pinky:     L[20].y< L[18].y-0.02
+    };
+  }
+
+  function detect(L){
+    const f = getFingerStates(L);
+    const ext = [f.index,f.middle,f.ring,f.pinky].filter(v=>v).length;
+    if(ext===4) return 'palm';
+    if(f.index && !f.middle && !f.ring && !f.pinky && !f.thumbUp && !f.thumbDown) return 'pointer';
+    if(f.thumbUp && ext===0) return 'thumbsup';
+    if(f.thumbDown && ext===0) return 'thumbsdown';
+    return 'other';
+  }
+
+  async function startCamera(){
+    try{
+      // инициализация MediaPipe Camera
+      const hands = new Hands({ locateFile: f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+      hands.setOptions({ maxNumHands:1, modelComplexity:1, minDetectionConfidence:0.8, minTrackingConfidence:0.8 });
+      hands.onResults(onResults);
+
+      // проверка getUserMedia
+      const stream = await navigator.mediaDevices.getUserMedia({ video:{ width:320, height:240 }, audio:false });
+      videoEl.srcObject = stream;
+      videoEl.play();
+      new Camera(videoEl, { onFrame:()=>hands.send({image:videoEl}), width:320, height:240 }).start();
+    } catch(err){
+      alert('Не удалось получить доступ к камере: '+err.message);
+    }
+  }
+
+  function onResults(res){
+    ctx.clearRect(0,0,canvasEl.width,canvasEl.height);
+    ctx.drawImage(res.image,0,0,canvasEl.width,canvasEl.height);
+    if(res.multiHandLandmarks?.length){
+      const L = res.multiHandLandmarks[0];
+      window.drawConnectors(ctx,L,HAND_CONNECTIONS,{color:'#CED46A',lineWidth:2});
+      window.drawLandmarks(ctx,L,{color:'#07553B',lineWidth:2});
+      const g = detect(L);
+      const names = { palm:'ладонь', pointer:'указательный', thumbsup:'большой вверх', thumbsdown:'большой вниз' };
+      gestureEl.innerText = names[g]||'-';
+      pointerSpeed = (g==='pointer') ? (L[8].x-0.5)*0.3 : 0;
+      if(cooldown===0){
+        switch(g){
+          case 'palm': trunk.material.color.setHex(Math.random()*0xffffff);
+                       leaves.children.forEach(lf=>lf.material.color.setHex(Math.random()*0xffffff)); cooldown=20; break;
+          case 'thumbsup': scale*=1.15; cooldown=20; break;
+          case 'thumbsdown': scale*=0.85; cooldown=20; break;
+        }
+      }
+      lastGesture = g;
+    }
+  }
+
+  startCamera();
+  </script>
+</body>
+</html>
